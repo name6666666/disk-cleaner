@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+<!-- 这个文件由AI负责 -->
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>清理项目审查</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font: 15px/1.5 system-ui, sans-serif;
+      --bg: #f5f7fa;
+      --panel: #fff;
+      --ink: #17212b;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --accent: #176b52;
+      --accent-soft: #e7f5ef;
+      --warning: #9a5b08;
+      --warning-soft: #fff4dc;
+      --danger: #a33b37;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111820; --panel: #1b2631; --ink: #ecf2f7; --muted: #a1afbd;
+        --line: #344250; --accent: #6bd3a5; --accent-soft: #193b30;
+        --warning: #f5c46b; --warning-soft: #40331b; --danger: #ff9188;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; color: var(--ink); background: var(--bg); }
+    main { max-width: 860px; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: start; margin-bottom: 18px; }
+    h1 { font-size: 1.35rem; margin: 0; letter-spacing: -.02em; }
+    .subtle, .empty { color: var(--muted); }
+    .subtle { margin: 4px 0 0; }
+    .summary { flex: 0 0 auto; border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 6px 12px; font-size: .85rem; }
+    #items { display: grid; gap: 10px; }
+    article { border: 1px solid var(--line); background: var(--panel); border-radius: 12px; padding: 14px; }
+    .item-head { display: flex; gap: 10px; align-items: center; }
+    .item-name { min-width: 0; flex: 1; overflow-wrap: anywhere; font-weight: 650; }
+    .score { white-space: nowrap; border-radius: 999px; padding: 3px 9px; font-size: .78rem; font-weight: 650; background: var(--warning-soft); color: var(--warning); }
+    .desc { margin: 0 0 12px; white-space: pre-wrap; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button { font: inherit; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--panel); padding: 7px 11px; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    button[aria-pressed="true"] { font-weight: 650; }
+    button.clean[aria-pressed="true"] { border-color: var(--danger); color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--panel)); }
+    button.keep[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    footer { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-top: 16px; }
+    #send { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 650; }
+    #status { color: var(--muted); font-size: .86rem; }
+    .notice { margin-top: 16px; color: var(--muted); font-size: .82rem; }
+    .empty { border: 1px dashed var(--line); border-radius: 12px; padding: 24px; text-align: center; }
+    @media (max-width: 520px) { body { padding: 14px; } header, footer { align-items: stretch; flex-direction: column; } .summary { align-self: start; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>清理项目审查</h1>
+      <p class="subtle">请逐项查看建议，并选择是否清理。</p>
+    </div>
+    <div id="summary" class="summary">正在等待清单…</div>
+  </header>
+  <section id="items" aria-live="polite">
+    <div class="empty">正在等待服务器发送清理清单。</div>
+  </section>
+  <footer>
+    <span id="status" role="status">尚未发送决定。</span>
+    <button id="send" disabled>发送决定</button>
+  </footer>
+  <p class="notice">这里只会将您的选择告知助手，不会删除或修改任何文件。</p>
+</main>
+<script>
+(() => {
+  const itemsEl = document.getElementById("items");
+  const summaryEl = document.getElementById("summary");
+  const statusEl = document.getElementById("status");
+  const sendButton = document.getElementById("send");
+  const decisions = new Map();
+  let items = [];
+  let requestId = 0;
+  const pending = new Map();
+
+  function request(method, params, timeoutMs = 10000) {
+    const id = `manifest-${++requestId}`;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+      window.setTimeout(() => {
+        const request = pending.get(id);
+        if (request) {
+          pending.delete(id);
+          reject(new Error("主机未响应。"));
+        }
+      }, timeoutMs);
+    });
+  }
+
+  function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function updateSummary() {
+    const decided = decisions.size;
+    const cleanup = [...decisions.values()].filter((choice) => choice === "clean").length;
+    summaryEl.textContent = `共 ${items.length} 项 · 已决定 ${decided}/${items.length} 项`;
+    sendButton.disabled = items.length === 0 || decided !== items.length;
+    if (decided > 0) {
+      statusEl.textContent = `${cleanup} 项选择清理 · ${decided - cleanup} 项选择保留`;
+    }
+  }
+
+  async function openDirectory(path) {
+    if (!path) return;
+    statusEl.textContent = `正在打开：${path}`;
+    try {
+      const result = await request("tools/call", {
+        name: "open_path",
+        arguments: { path }
+      }, 60000);
+      if (result && result.isError) throw new Error("主机拒绝了打开请求。");
+      statusEl.textContent = `已在文件管理器中打开：${path}`;
+    } catch (error) {
+      statusEl.textContent = `无法打开目录：${error.message}`;
+    }
+  }
+
+  function render() {
+    itemsEl.replaceChildren();
+    if (items.length === 0) {
+      itemsEl.append(element("div", "empty", "没有建议清理的项目。"));
+      summaryEl.textContent = "没有项目";
+      sendButton.disabled = true;
+      return;
+    }
+    items.forEach((item, index) => {
+      const card = element("article");
+      const head = element("div", "item-head");
+      head.append(element("span", "item-name", item.path || "（缺少路径）"));
+      head.append(element("span", "score", `安全评分 ${item.safety}/100`));
+      card.append(head);
+      const sizeMb = item.size_mb;
+      if (typeof sizeMb === "number" && Number.isFinite(sizeMb) && sizeMb >= 0) {
+        card.append(element("p", "subtle", `大小：${sizeMb.toLocaleString("zh-CN", {
+          maximumFractionDigits: 3
+        })} MB`));
+      } else {
+        card.append(element("p", "subtle", "大小：未知"));
+      }
+      if (item.desc) card.append(element("p", "desc", item.desc));
+
+      const actions = element("div", "actions");
+      const browse = element("button", "browse", "浏览目录");
+      const clean = element("button", "clean", "选择清理");
+      const keep = element("button", "keep", "保留");
+      browse.type = clean.type = keep.type = "button";
+      browse.addEventListener("click", () => openDirectory(item.path));
+      clean.setAttribute("aria-pressed", decisions.get(index) === "clean");
+      keep.setAttribute("aria-pressed", decisions.get(index) === "keep");
+      clean.addEventListener("click", () => {
+        decisions.set(index, "clean");
+        render();
+      });
+      keep.addEventListener("click", () => {
+        decisions.set(index, "keep");
+        render();
+      });
+      actions.append(browse, clean, keep);
+      card.append(actions);
+      itemsEl.append(card);
+    });
+    updateSummary();
+  }
+
+  function showResult(result) {
+    let data = result && result.structuredContent;
+    if (!data && Array.isArray(result && result.content)) {
+      const text = result.content.find((part) => part.type === "text");
+      if (text) {
+        try { data = JSON.parse(text.text); } catch (_) { /* Show the empty state below. */ }
+      }
+    }
+    const incoming = data && (data.to_cleans || data.toCleans);
+    if (!Array.isArray(incoming)) {
+      statusEl.textContent = "服务器返回的清理清单格式无效。";
+      return;
+    }
+    items = incoming.filter((item) => item && typeof item === "object");
+    decisions.clear();
+    items.forEach((_, index) => decisions.set(index, "keep"));
+    render();
+    statusEl.textContent = "默认全部保留，请选择需要清理的项目。";
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent || !event.data || event.data.jsonrpc !== "2.0") return;
+    const message = event.data;
+    if (message.id !== undefined && pending.has(message.id)) {
+      const handlers = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.error) handlers.reject(new Error(message.error.message || "主机请求失败。"));
+      else handlers.resolve(message.result);
+      return;
+    }
+    if (message.method === "ui/notifications/tool-result") showResult(message.params);
+  });
+
+  sendButton.addEventListener("click", async () => {
+    const clean = [];
+    const keep = [];
+    items.forEach((item, index) => {
+      (decisions.get(index) === "clean" ? clean : keep).push(item.path);
+    });
+    const text = [
+      "清理清单决定：",
+      ...clean.map((path) => `清理：${path}`),
+      ...keep.map((path) => `保留：${path}`),
+      "在我明确确认清理操作之前，请勿删除任何内容。"
+    ].join("\n");
+    sendButton.disabled = true;
+    statusEl.textContent = "正在发送决定…";
+    try {
+      await request("ui/message", { role: "user", content: [{ type: "text", text }] });
+      statusEl.textContent = "已将决定发送给助手。";
+    } catch (error) {
+      statusEl.textContent = `发送决定失败：${error.message}`;
+      sendButton.disabled = false;
+    }
+  });
+
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    clientInfo: { name: "Disk Cleaner Manifest", version: "0.1.0" },
+    appCapabilities: {}
+  }).then(() => {
+    window.parent.postMessage({
+      jsonrpc: "2.0",
+      method: "ui/notifications/initialized",
+      params: {}
+    }, "*");
+  }).catch((error) => {
+    statusEl.textContent = `无法连接到主机：${error.message}`;
+  });
+})();
+</script>
+</body>
+</html>
